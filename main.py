@@ -1,19 +1,30 @@
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import List, Optional
+
 from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.responses import HTMLResponse
-from sqlmodel import Session, select, or_
+from sqlmodel import Session, select, or_, SQLModel
+
 from database.session import engine, get_session
 from models.book import Book, BookCreate, BookUpdate
 
-app = FastAPI(title="Book Inventory API", version="1.0.0")
+
+# Modern FastAPI Lifespan handler replacing deprecated @app.on_event("startup")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        SQLModel.metadata.create_all(engine)
+    except Exception as e:
+        print(f"Database initialization warning (skipping table creation): {e}")
+    yield
 
 
-# Auto-create database tables on application startup
-@app.on_event("startup")
-def on_startup():
-    from sqlmodel import SQLModel
-    SQLModel.metadata.create_all(engine)
+app = FastAPI(
+    title="Book Inventory API",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -129,7 +140,6 @@ async def portfolio():
 
 @app.post("/books", response_model=Book, status_code=status.HTTP_201_CREATED)
 def create_book(book_data: BookCreate, session: Session = Depends(get_session)):
-    # Check if ISBN already exists
     existing_book = session.exec(select(Book).where(Book.isbn == book_data.isbn)).first()
     if existing_book:
         raise HTTPException(
@@ -167,7 +177,6 @@ def search_books(
     q: str = Query(..., min_length=1, description="Search keyword for title or author"),
     session: Session = Depends(get_session)
 ):
-    # Case-insensitive partial match search using ILIKE
     statement = select(Book).where(
         or_(
             Book.title.ilike(f"%{q}%"),
@@ -192,10 +201,8 @@ def update_book(book_id: int, book_data: BookUpdate, session: Session = Depends(
     if not db_book:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Book not found")
     
-    # Extract explicitly passed fields
     update_dict = book_data.model_dump(exclude_unset=True)
     
-    # If updating ISBN, ensure it doesn't conflict with another book
     if "isbn" in update_dict and update_dict["isbn"] != db_book.isbn:
         isbn_conflict = session.exec(select(Book).where(Book.isbn == update_dict["isbn"])).first()
         if isbn_conflict:
